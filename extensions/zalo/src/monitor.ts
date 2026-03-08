@@ -64,14 +64,39 @@ export type ZaloMonitorOptions = {
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
 };
 
-export type ZaloMonitorResult = {
-  stop: () => void;
-};
-
 const ZALO_TEXT_LIMIT = 2000;
 const DEFAULT_MEDIA_MAX_MB = 5;
 
 type ZaloCoreRuntime = ReturnType<typeof getZaloRuntime>;
+
+function formatZaloError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? `${error.name}: ${error.message}`;
+  }
+  return String(error);
+}
+
+function describeWebhookTarget(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return rawUrl;
+  }
+}
+
+async function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function logVerbose(core: ZaloCoreRuntime, runtime: ZaloRuntimeEnv, message: string): void {
   if (core.logging.shouldLogVerbose()) {
@@ -151,6 +176,8 @@ function startPollingLoop(params: {
   } = params;
   const pollTimeout = 30;
 
+  runtime.log?.(`[${account.accountId}] Zalo polling loop started timeout=${String(pollTimeout)}s`);
+
   const poll = async () => {
     if (isStopped() || abortSignal.aborted) {
       return;
@@ -176,7 +203,7 @@ function startPollingLoop(params: {
       if (err instanceof ZaloApiError && err.isPollingTimeout) {
         // no updates
       } else if (!isStopped() && !abortSignal.aborted) {
-        runtime.error?.(`[${account.accountId}] Zalo polling error: ${String(err)}`);
+        runtime.error?.(`[${account.accountId}] Zalo polling error: ${formatZaloError(err)}`);
         await new Promise((resolve) => setTimeout(resolve, 5000));
       }
     }
@@ -597,7 +624,7 @@ async function deliverZaloReply(params: {
   }
 }
 
-export async function monitorZaloProvider(options: ZaloMonitorOptions): Promise<ZaloMonitorResult> {
+export async function monitorZaloProvider(options: ZaloMonitorOptions): Promise<void> {
   const {
     token,
     account,
@@ -615,78 +642,114 @@ export async function monitorZaloProvider(options: ZaloMonitorOptions): Promise<
   const core = getZaloRuntime();
   const effectiveMediaMaxMb = account.config.mediaMaxMb ?? DEFAULT_MEDIA_MAX_MB;
   const fetcher = fetcherOverride ?? resolveZaloProxyFetch(account.config.proxy);
+  const mode = useWebhook ? "webhook" : "polling";
 
   let stopped = false;
   const stopHandlers: Array<() => void> = [];
 
   const stop = () => {
+    if (stopped) {
+      return;
+    }
     stopped = true;
     for (const handler of stopHandlers) {
       handler();
     }
   };
 
-  if (useWebhook) {
-    if (!webhookUrl || !webhookSecret) {
-      throw new Error("Zalo webhookUrl and webhookSecret are required for webhook mode");
-    }
-    if (!webhookUrl.startsWith("https://")) {
-      throw new Error("Zalo webhook URL must use HTTPS");
-    }
-    if (webhookSecret.length < 8 || webhookSecret.length > 256) {
-      throw new Error("Zalo webhook secret must be 8-256 characters");
+  runtime.log?.(
+    `[${account.accountId}] Zalo provider init mode=${mode} mediaMaxMb=${String(effectiveMediaMaxMb)}`,
+  );
+
+  try {
+    if (useWebhook) {
+      if (!webhookUrl || !webhookSecret) {
+        throw new Error("Zalo webhookUrl and webhookSecret are required for webhook mode");
+      }
+      if (!webhookUrl.startsWith("https://")) {
+        throw new Error("Zalo webhook URL must use HTTPS");
+      }
+      if (webhookSecret.length < 8 || webhookSecret.length > 256) {
+        throw new Error("Zalo webhook secret must be 8-256 characters");
+      }
+
+      const path = resolveWebhookPath({ webhookPath, webhookUrl, defaultPath: null });
+      if (!path) {
+        throw new Error("Zalo webhookPath could not be derived");
+      }
+
+      runtime.log?.(
+        `[${account.accountId}] Zalo configuring webhook path=${path} target=${describeWebhookTarget(webhookUrl)}`,
+      );
+      await setWebhook(token, { url: webhookUrl, secret_token: webhookSecret }, fetcher);
+      runtime.log?.(`[${account.accountId}] Zalo webhook registered path=${path}`);
+
+      const unregister = registerZaloWebhookTarget({
+        token,
+        account,
+        config,
+        runtime,
+        core,
+        path,
+        secret: webhookSecret,
+        statusSink: (patch) => statusSink?.(patch),
+        mediaMaxMb: effectiveMediaMaxMb,
+        fetcher,
+      });
+      stopHandlers.push(unregister);
+      abortSignal.addEventListener(
+        "abort",
+        () => {
+          runtime.log?.(`[${account.accountId}] Zalo abort received; deleting webhook`);
+          void deleteWebhook(token, fetcher)
+            .then(() => {
+              runtime.log?.(`[${account.accountId}] Zalo webhook deleted`);
+            })
+            .catch((err) => {
+              runtime.error?.(
+                `[${account.accountId}] Zalo webhook delete failed: ${formatZaloError(err)}`,
+              );
+            });
+        },
+        { once: true },
+      );
+      await waitForAbort(abortSignal);
+      return;
     }
 
-    const path = resolveWebhookPath({ webhookPath, webhookUrl, defaultPath: null });
-    if (!path) {
-      throw new Error("Zalo webhookPath could not be derived");
+    runtime.log?.(`[${account.accountId}] Zalo polling mode: clearing webhook before startup`);
+    try {
+      await deleteWebhook(token, fetcher);
+      runtime.log?.(`[${account.accountId}] Zalo polling mode ready (webhook disabled)`);
+    } catch (err) {
+      runtime.error?.(
+        `[${account.accountId}] Zalo polling startup could not clear webhook: ${formatZaloError(err)}`,
+      );
     }
 
-    await setWebhook(token, { url: webhookUrl, secret_token: webhookSecret }, fetcher);
-
-    const unregister = registerZaloWebhookTarget({
+    startPollingLoop({
       token,
       account,
       config,
       runtime,
       core,
-      path,
-      secret: webhookSecret,
-      statusSink: (patch) => statusSink?.(patch),
+      abortSignal,
+      isStopped: () => stopped,
       mediaMaxMb: effectiveMediaMaxMb,
+      statusSink,
       fetcher,
     });
-    stopHandlers.push(unregister);
-    abortSignal.addEventListener(
-      "abort",
-      () => {
-        void deleteWebhook(token, fetcher).catch(() => {});
-      },
-      { once: true },
+
+    await waitForAbort(abortSignal);
+  } catch (err) {
+    runtime.error?.(
+      `[${account.accountId}] Zalo provider startup failed mode=${mode}: ${formatZaloError(err)}`,
     );
-    return { stop };
+    throw err;
+  } finally {
+    stop();
+    runtime.log?.(`[${account.accountId}] Zalo provider stopped mode=${mode}`);
   }
-
-  try {
-    await deleteWebhook(token, fetcher);
-  } catch {
-    // ignore
-  }
-
-  startPollingLoop({
-    token,
-    account,
-    config,
-    runtime,
-    core,
-    abortSignal,
-    isStopped: () => stopped,
-    mediaMaxMb: effectiveMediaMaxMb,
-    statusSink,
-    fetcher,
-  });
-
-  return { stop };
 }
 
 export const __testing = {
