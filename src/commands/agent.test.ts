@@ -19,6 +19,14 @@ import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/chan
 import { agentCommand, agentCommandFromIngress } from "./agent.js";
 import * as agentDeliveryModule from "./agent/delivery.js";
 
+const hoisted = vi.hoisted(() => ({
+  callGatewayMock: vi.fn(),
+}));
+
+vi.mock("../gateway/call.js", () => ({
+  callGateway: (args: unknown) => hoisted.callGatewayMock(args),
+}));
+
 vi.mock("../agents/auth-profiles.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../agents/auth-profiles.js")>();
   return {
@@ -257,6 +265,7 @@ function createTelegramOutboundPlugin() {
 beforeEach(() => {
   vi.clearAllMocks();
   configModule.clearRuntimeConfigSnapshot();
+  hoisted.callGatewayMock.mockReset();
   runCliAgentSpy.mockResolvedValue(createDefaultAgentResult() as never);
   vi.mocked(runEmbeddedPiAgent).mockResolvedValue(createDefaultAgentResult());
   vi.mocked(loadModelCatalog).mockResolvedValue([]);
@@ -742,6 +751,62 @@ describe("agentCommand", () => {
       });
       expect(callArgs?.sessionKey).toBe("agent:ops:main");
       expect(callArgs?.sessionFile).toContain(`${path.sep}agents${path.sep}ops${path.sep}sessions`);
+    });
+  });
+
+  it("routes main writing intents to writer before model execution", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store, undefined, undefined, [
+        { id: "main", default: true },
+        { id: "writer" },
+      ]);
+      hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+        if (request.method === "agent") {
+          return { runId: "writer-run-1" };
+        }
+        if (request.method === "agent.wait") {
+          return { status: "ok" };
+        }
+        if (request.method === "chat.history") {
+          return {
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "https://feishu.cn/docx/writer-ingress" }],
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected method: ${String(request.method)}`);
+      });
+
+      const result = await agentCommand(
+        {
+          message: "让 writer 创建一个飞书文档，标题是 常用命令行速查",
+          agentId: "main",
+        },
+        runtime,
+      );
+
+      expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
+      expect(result.payloads?.[0]?.text).toBe("https://feishu.cn/docx/writer-ingress");
+      expect(hoisted.callGatewayMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: "agent",
+          params: expect.objectContaining({
+            agentId: "writer",
+            sessionKey: "agent:writer:main",
+          }),
+        }),
+      );
+
+      const saved = readSessionStore<{ sessionFile?: string }>(store);
+      const entry = saved["agent:main:main"];
+      expect(entry?.sessionFile).toBeTruthy();
+      const transcript = fs.readFileSync(entry!.sessionFile!, "utf-8");
+      expect(transcript).toContain("让 writer 创建一个飞书文档");
+      expect(transcript).toContain("https://feishu.cn/docx/writer-ingress");
     });
   });
 

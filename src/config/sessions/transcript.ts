@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import {
+  applyInputProvenanceToUserMessage,
+  type InputProvenance,
+} from "../../sessions/input-provenance.js";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { parseSessionThreadInfo } from "./delivery-info.js";
 import {
@@ -130,14 +135,64 @@ export async function resolveSessionTranscriptFile(params: {
   };
 }
 
-export async function appendAssistantMessageToSessionTranscript(params: {
+const ZERO_USAGE = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+  },
+} as const;
+
+type TranscriptRole = "user" | "assistant";
+
+function buildTranscriptMessage(params: {
+  role: TranscriptRole;
+  text: string;
+  inputProvenance?: InputProvenance;
+  now?: number;
+}): Parameters<SessionManager["appendMessage"]>[0] {
+  const timestamp = params.now ?? Date.now();
+  if (params.role === "assistant") {
+    return {
+      role: "assistant",
+      content: [{ type: "text", text: params.text }],
+      api: "openai-responses",
+      provider: "openclaw",
+      model: "delivery-mirror",
+      usage: ZERO_USAGE,
+      stopReason: "stop",
+      timestamp,
+    };
+  }
+
+  const userMessage = applyInputProvenanceToUserMessage(
+    {
+      role: "user",
+      content: [{ type: "text", text: params.text }],
+      timestamp,
+    } satisfies AgentMessage,
+    params.inputProvenance,
+  );
+  return userMessage as Parameters<SessionManager["appendMessage"]>[0];
+}
+
+export async function appendMessageToSessionTranscript(params: {
   agentId?: string;
   sessionKey: string;
+  role: TranscriptRole;
   text?: string;
   mediaUrls?: string[];
   idempotencyKey?: string;
   /** Optional override for store path (mostly for tests). */
   storePath?: string;
+  inputProvenance?: InputProvenance;
 }): Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> {
   const sessionKey = params.sessionKey.trim();
   if (!sessionKey) {
@@ -188,28 +243,13 @@ export async function appendAssistantMessageToSessionTranscript(params: {
   }
 
   const sessionManager = SessionManager.open(sessionFile);
+  const message = buildTranscriptMessage({
+    role: params.role,
+    text: mirrorText,
+    inputProvenance: params.inputProvenance,
+  });
   sessionManager.appendMessage({
-    role: "assistant",
-    content: [{ type: "text", text: mirrorText }],
-    api: "openai-responses",
-    provider: "openclaw",
-    model: "delivery-mirror",
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      },
-    },
-    stopReason: "stop",
-    timestamp: Date.now(),
+    ...message,
     ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
   });
 
@@ -240,4 +280,19 @@ async function transcriptHasIdempotencyKey(
     return false;
   }
   return false;
+}
+
+export async function appendAssistantMessageToSessionTranscript(params: {
+  agentId?: string;
+  sessionKey: string;
+  text?: string;
+  mediaUrls?: string[];
+  idempotencyKey?: string;
+  /** Optional override for store path (mostly for tests). */
+  storePath?: string;
+}): Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> {
+  return appendMessageToSessionTranscript({
+    ...params,
+    role: "assistant",
+  });
 }

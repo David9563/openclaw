@@ -209,6 +209,29 @@ describe("commands registry", () => {
     expect(modeArg?.choices).toEqual(["status", "on", "off"]);
   });
 
+  it("keeps ops native action choices aligned with implemented handlers", () => {
+    const ops = listChatCommands().find((command) => command.key === "ops");
+    expect(ops).toBeTruthy();
+    const actionArg = ops?.args?.find((arg) => arg.name === "action");
+    expect(actionArg?.choices).toEqual([
+      "list",
+      "status",
+      "onboard",
+      "pause",
+      "resume",
+      "run",
+      "doctor",
+      "help",
+    ]);
+  });
+
+  it("registers the writer delegation command", () => {
+    const writer = listChatCommands().find((command) => command.key === "writer");
+    expect(writer).toBeTruthy();
+    expect(writer?.textAliases).toContain("/writer");
+    expect(writer?.acceptsArgs).toBe(true);
+  });
+
   it("detects known text commands", () => {
     const detection = getCommandDetection();
     expect(detection.exact.has("/commands")).toBe(true);

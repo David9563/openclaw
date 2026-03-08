@@ -13,6 +13,7 @@ import { handleApproveCommand } from "./commands-approve.js";
 import { handleBashCommand } from "./commands-bash.js";
 import { handleBtwCommand } from "./commands-btw.js";
 import { handleCompactCommand } from "./commands-compact.js";
+import { handleClusterDelegationCommand } from "./commands-cluster.js";
 import { handleConfigCommand, handleDebugCommand } from "./commands-config.js";
 import {
   handleCommandsListCommand,
@@ -23,6 +24,7 @@ import {
   handleWhoamiCommand,
 } from "./commands-info.js";
 import { handleModelsCommand } from "./commands-models.js";
+import { handleOpsCommand } from "./commands-ops.js";
 import { handlePluginCommand } from "./commands-plugin.js";
 import {
   handleAbortTrigger,
@@ -192,6 +194,8 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       handleContextCommand,
       handleExportSessionCommand,
       handleWhoamiCommand,
+      handleClusterDelegationCommand,
+      handleOpsCommand,
       handleSubagentsCommand,
       handleAcpCommand,
       handleConfigCommand,

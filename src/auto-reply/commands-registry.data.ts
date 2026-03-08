@@ -320,6 +320,48 @@ function buildChatCommands(): ChatCommandDefinition[] {
       argsMenu: "auto",
     }),
     defineChatCommand({
+      key: "writer",
+      nativeName: "writer",
+      description: "Synchronously delegate document and reporting tasks to writer.",
+      textAlias: "/writer",
+      category: "management",
+      args: [
+        {
+          name: "task",
+          description: "Writing or Feishu document task",
+          type: "string",
+          captureRemaining: true,
+        },
+      ],
+    }),
+    defineChatCommand({
+      key: "ops",
+      nativeName: "ops",
+      description: "Synchronously manage project-ops projects.",
+      textAlias: "/ops",
+      category: "management",
+      args: [
+        {
+          name: "action",
+          description: "list | status | onboard | pause | resume | run | doctor | help",
+          type: "string",
+          choices: ["list", "status", "onboard", "pause", "resume", "run", "doctor", "help"],
+        },
+        {
+          name: "target",
+          description: "Project id or repo path input",
+          type: "string",
+        },
+        {
+          name: "value",
+          description: "Additional args and flags",
+          type: "string",
+          captureRemaining: true,
+        },
+      ],
+      argsMenu: "auto",
+    }),
+    defineChatCommand({
       key: "acp",
       nativeName: "acp",
       description: "Manage ACP sessions and runtime options.",

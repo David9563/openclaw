@@ -15,6 +15,10 @@ import {
   resolveAgentSkillsFilter,
   resolveAgentWorkspaceDir,
 } from "../agents/agent-scope.js";
+import {
+  matchInternalClusterDelegation,
+  runInternalClusterDelegation,
+} from "../agents/internal-cluster-routing.js";
 import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
 import { clearSessionAuthProfileOverride } from "../agents/auth-profiles/session-override.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../agents/bootstrap-budget.js";
@@ -68,6 +72,7 @@ import {
   setRuntimeConfigSnapshot,
 } from "../config/config.js";
 import {
+  appendMessageToSessionTranscript,
   mergeSessionEntry,
   resolveAgentIdFromSessionKey,
   type SessionEntry,
@@ -93,6 +98,21 @@ import { resolveAgentRunContext } from "./agent/run-context.js";
 import { updateSessionStoreAfterAgentRun } from "./agent/session-store.js";
 import { resolveSession } from "./agent/session.js";
 import type { AgentCommandIngressOpts, AgentCommandOpts } from "./agent/types.js";
+
+function buildDelegatedResult(params: {
+  text: string;
+  durationMs: number;
+  isError?: boolean;
+  stopReason: string;
+}) {
+  return {
+    payloads: [{ text: params.text, ...(params.isError ? { isError: true } : {}) }],
+    meta: {
+      durationMs: params.durationMs,
+      stopReason: params.stopReason,
+    },
+  };
+}
 
 type PersistSessionEntryParams = {
   sessionStore: Record<string, SessionEntry>;
@@ -649,6 +669,7 @@ async function prepareAgentCommandExecution(
     : null;
 
   return {
+    message,
     body,
     cfg,
     normalizedSpawned,
@@ -682,6 +703,7 @@ async function agentCommandInternal(
 ) {
   const prepared = await prepareAgentCommandExecution(opts, runtime);
   const {
+    message,
     body,
     cfg,
     normalizedSpawned,
@@ -719,6 +741,134 @@ async function agentCommandInternal(
       if (sendPolicy === "deny") {
         throw new Error("send blocked by session policy");
       }
+    }
+
+    if (sessionStore && sessionKey && storePath && (!sessionEntry || !sessionEntry.sessionId)) {
+      const next: SessionEntry = {
+        ...(sessionEntry ?? {}),
+        sessionId,
+        updatedAt: Date.now(),
+      };
+      if (thinkOverride) {
+        next.thinkingLevel = thinkOverride;
+      }
+      applyVerboseOverride(next, verboseOverride);
+      await persistSessionEntry({
+        sessionStore,
+        sessionKey,
+        storePath,
+        entry: next,
+      });
+      sessionEntry = next;
+    }
+
+    const runContextForDelegation = resolveAgentRunContext(opts);
+    const requesterChannel = resolveMessageChannel(
+      runContextForDelegation.messageChannel,
+      opts.replyChannel ?? opts.channel,
+    );
+    const delegation = matchInternalClusterDelegation({
+      agentId: sessionAgentId,
+      isGroup: Boolean(
+        runContextForDelegation.groupId ??
+          opts.groupId ??
+          runContextForDelegation.groupChannel ??
+          opts.groupChannel ??
+          runContextForDelegation.groupSpace ??
+          opts.groupSpace,
+      ),
+      raw: message,
+    });
+    if (delegation && opts.senderIsOwner) {
+      const startedAt = Date.now();
+      if (sessionKey) {
+        registerAgentRunContext(runId, {
+          sessionKey,
+        });
+      }
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "start",
+          startedAt,
+        },
+      });
+
+      const delegated = await runInternalClusterDelegation({
+        cfg,
+        requesterSessionKey: sessionKey ?? sessionId,
+        requesterChannel: requesterChannel ?? "internal",
+        delegation,
+        sourceTool: "cluster_delegate",
+      });
+      const transcriptMirrorText = [
+        `[Delegated to ${delegation.route.agentId}]`,
+        `Request: ${message}`,
+        "Result:",
+        delegated.text,
+      ].join("\n");
+
+      if (sessionKey) {
+        if (opts.deliver !== true) {
+          // Keep delegated request context in the transcript even though this
+          // turn bypasses the normal model runner and returns synchronously.
+          await appendMessageToSessionTranscript({
+            agentId: sessionAgentId,
+            sessionKey,
+            role: "assistant",
+            text: transcriptMirrorText,
+            storePath,
+          });
+        }
+      }
+
+      emitAgentEvent({
+        runId,
+        stream: "assistant",
+        data: {
+          text: delegated.text,
+          delta: delegated.text,
+        },
+      });
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        data: {
+          phase: "end",
+          startedAt,
+          endedAt: Date.now(),
+          aborted: false,
+          stopReason:
+            delegated.kind === "timeout"
+              ? "delegated_timeout"
+              : delegated.kind === "error"
+                ? "delegated_error"
+                : "delegated",
+        },
+      });
+
+      const result = buildDelegatedResult({
+        text: delegated.text,
+        durationMs: Date.now() - startedAt,
+        isError: delegated.kind === "error",
+        stopReason:
+          delegated.kind === "timeout"
+            ? "delegated_timeout"
+            : delegated.kind === "error"
+              ? "delegated_error"
+              : "delegated",
+      });
+      return await deliverAgentCommandResult({
+        cfg,
+        deps,
+        runtime,
+        opts,
+        outboundSession,
+        sessionEntry,
+        result,
+        payloads: result.payloads,
+      });
     }
 
     if (acpResolution?.kind === "stale") {
