@@ -5,9 +5,11 @@ import type {
   OutboundReplyPayload,
 } from "openclaw/plugin-sdk/zalo";
 import {
+  createTypingCallbacks,
   createScopedPairingAccess,
   createReplyPrefixOptions,
   issuePairingChallenge,
+  logTypingFailure,
   resolveDirectDmAuthorizationOutcome,
   resolveSenderCommandAuthorizationWithRuntime,
   resolveOutboundMediaUrls,
@@ -21,7 +23,9 @@ import type { ResolvedZaloAccount } from "./accounts.js";
 import {
   ZaloApiError,
   deleteWebhook,
+  getWebhookInfo,
   getUpdates,
+  sendChatAction,
   sendMessage,
   sendPhoto,
   setWebhook,
@@ -83,6 +87,11 @@ function describeWebhookTarget(rawUrl: string): string {
   } catch {
     return rawUrl;
   }
+}
+
+function normalizeWebhookUrl(url: string | undefined): string | undefined {
+  const trimmed = url?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 async function waitForAbort(signal: AbortSignal): Promise<void> {
@@ -549,12 +558,34 @@ async function processMessageWithPipeline(params: {
     channel: "zalo",
     accountId: account.accountId,
   });
+  const typingCallbacks = createTypingCallbacks({
+    start: async () => {
+      await sendChatAction(
+        token,
+        {
+          chat_id: chatId,
+          action: "typing",
+        },
+        fetcher,
+      );
+    },
+    onStartError: (err) => {
+      logTypingFailure({
+        log: (message) => logVerbose(core, runtime, message),
+        channel: "zalo",
+        action: "start",
+        target: chatId,
+        error: err,
+      });
+    },
+  });
 
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg: config,
     dispatcherOptions: {
       ...prefixOptions,
+      typingCallbacks,
       deliver: async (payload) => {
         await deliverZaloReply({
           payload,
@@ -594,7 +625,6 @@ async function deliverZaloReply(params: {
   const { payload, token, chatId, runtime, core, config, accountId, statusSink, fetcher } = params;
   const tableMode = params.tableMode ?? "code";
   const text = core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode);
-
   const sentMedia = await sendMediaWithLeadingCaption({
     mediaUrls: resolveOutboundMediaUrls(payload),
     caption: text,
@@ -719,8 +749,29 @@ export async function monitorZaloProvider(options: ZaloMonitorOptions): Promise<
 
     runtime.log?.(`[${account.accountId}] Zalo polling mode: clearing webhook before startup`);
     try {
-      await deleteWebhook(token, fetcher);
-      runtime.log?.(`[${account.accountId}] Zalo polling mode ready (webhook disabled)`);
+      try {
+        const currentWebhookUrl = normalizeWebhookUrl(
+          (await getWebhookInfo(token, fetcher)).result?.url,
+        );
+        if (!currentWebhookUrl) {
+          runtime.log?.(`[${account.accountId}] Zalo polling mode ready (no webhook configured)`);
+        } else {
+          runtime.log?.(
+            `[${account.accountId}] Zalo polling mode disabling existing webhook ${describeWebhookTarget(currentWebhookUrl)}`,
+          );
+          await deleteWebhook(token, fetcher);
+          runtime.log?.(`[${account.accountId}] Zalo polling mode ready (webhook disabled)`);
+        }
+      } catch (err) {
+        if (err instanceof ZaloApiError && err.errorCode === 404) {
+          // Some Zalo environments do not expose webhook inspection for polling bots.
+          runtime.log?.(
+            `[${account.accountId}] Zalo polling mode webhook inspection unavailable; continuing without webhook cleanup`,
+          );
+        } else {
+          throw err;
+        }
+      }
     } catch (err) {
       runtime.error?.(
         `[${account.accountId}] Zalo polling startup could not clear webhook: ${formatZaloError(err)}`,
