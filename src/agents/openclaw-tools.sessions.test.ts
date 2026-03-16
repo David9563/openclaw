@@ -514,6 +514,7 @@ describe("sessions tools", () => {
     let agentCallCount = 0;
     let _historyCallCount = 0;
     let sendCallCount = 0;
+    const sentMessages: Array<{ to?: string; channel?: string; message?: string }> = [];
     let lastWaitedRunId: string | undefined;
     const replyByRunId = new Map<string, string>();
     const requesterKey = "discord:group:req";
@@ -565,6 +566,14 @@ describe("sessions tools", () => {
       }
       if (request.method === "send") {
         sendCallCount += 1;
+        const params = request.params as
+          | { to?: string; channel?: string; message?: string }
+          | undefined;
+        sentMessages.push({
+          to: params?.to,
+          channel: params?.channel,
+          message: params?.message,
+        });
         return { messageId: "m1" };
       }
       return {};
@@ -649,7 +658,12 @@ describe("sessions tools", () => {
     ).toBe(true);
     expect(waitCalls).toHaveLength(8);
     expect(historyOnlyCalls).toHaveLength(8);
-    expect(sendCallCount).toBe(0);
+    await waitForCalls(() => calls.filter((call) => call.method === "send").length, 2);
+    expect(sendCallCount).toBe(2);
+    expect(sentMessages).toEqual([
+      { to: "channel:req", channel: "discord", message: "done" },
+      { to: "channel:req", channel: "discord", message: "done" },
+    ]);
   });
 
   it("sessions_send resolves sessionId inputs", async () => {
@@ -814,6 +828,124 @@ describe("sessions tools", () => {
       to: "channel:target",
       channel: "discord",
       message: "announce now",
+    });
+  });
+
+  it("sessions_send falls back to the requester chat when announce is silent", async () => {
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    let agentCallCount = 0;
+    let lastWaitedRunId: string | undefined;
+    const replyByRunId = new Map<string, string>();
+    const requesterKey = "agent:main:feishu:direct:ou_requester";
+    const targetKey = "agent:main:webchat:group:project-ops";
+    let sendParams:
+      | {
+          to?: string;
+          channel?: string;
+          message?: string;
+          accountId?: string;
+        }
+      | undefined;
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: unknown };
+      calls.push(request);
+      if (request.method === "agent") {
+        agentCallCount += 1;
+        const runId = `run-fallback-${agentCallCount}`;
+        const params = request.params as
+          | {
+              sessionKey?: string;
+              extraSystemPrompt?: string;
+            }
+          | undefined;
+        let reply = "project-ops: openclaw command not found";
+        if (params?.extraSystemPrompt?.includes("Agent-to-agent reply step")) {
+          reply = "REPLY_SKIP";
+        } else if (params?.extraSystemPrompt?.includes("Agent-to-agent announce step")) {
+          reply = "ANNOUNCE_SKIP";
+        }
+        replyByRunId.set(runId, reply);
+        return { runId, status: "accepted" };
+      }
+      if (request.method === "agent.wait") {
+        const params = request.params as { runId?: string } | undefined;
+        lastWaitedRunId = params?.runId;
+        return { runId: params?.runId ?? "run-fallback-1", status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        const text = (lastWaitedRunId && replyByRunId.get(lastWaitedRunId)) ?? "";
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text }],
+              timestamp: 20,
+            },
+          ],
+        };
+      }
+      if (request.method === "sessions.list") {
+        return {
+          sessions: [
+            {
+              key: requesterKey,
+              deliveryContext: {
+                channel: "feishu",
+                to: "p2p:ou_requester",
+                accountId: "default",
+              },
+              lastChannel: "feishu",
+              lastTo: "p2p:ou_requester",
+              lastAccountId: "default",
+            },
+          ],
+        };
+      }
+      if (request.method === "send") {
+        const params = request.params as
+          | { to?: string; channel?: string; message?: string; accountId?: string }
+          | undefined;
+        sendParams = {
+          to: params?.to,
+          channel: params?.channel,
+          message: params?.message,
+          accountId: params?.accountId,
+        };
+        return { messageId: "m-fallback" };
+      }
+      return {};
+    });
+
+    const tool = createOpenClawTools({
+      agentSessionKey: requesterKey,
+      agentChannel: "feishu",
+    }).find((candidate) => candidate.name === "sessions_send");
+    expect(tool).toBeDefined();
+    if (!tool) {
+      throw new Error("missing sessions_send tool");
+    }
+
+    const waited = await tool.execute("call-fallback", {
+      sessionKey: targetKey,
+      message: "/ops status production-control-platform",
+      timeoutSeconds: 1,
+    });
+    expect(waited.details).toMatchObject({
+      status: "ok",
+      reply: "project-ops: openclaw command not found",
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(calls.filter((call) => call.method === "send")).toHaveLength(1);
+      },
+      { timeout: 2_000, interval: 5 },
+    );
+    expect(sendParams).toMatchObject({
+      to: "p2p:ou_requester",
+      channel: "feishu",
+      accountId: "default",
+      message: "project-ops: openclaw command not found",
     });
   });
 

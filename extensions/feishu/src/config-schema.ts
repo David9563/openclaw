@@ -128,6 +128,15 @@ const GroupSessionScopeSchema = z
 const TopicSessionModeSchema = z.enum(["disabled", "enabled"]).optional();
 const ReactionNotificationModeSchema = z.enum(["off", "own", "all"]).optional();
 
+const FeishuAutoGroupBindingSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    aliases: z.record(z.string(), z.string()).optional(),
+    prefixes: z.array(z.string()).optional(),
+  })
+  .strict()
+  .optional();
+
 /**
  * Reply-in-thread mode for group chats.
  * - "disabled" (default): Bot replies are normal inline replies
@@ -178,6 +187,7 @@ const FeishuSharedConfigShape = {
   streaming: StreamingModeSchema,
   tools: FeishuToolsConfigSchema,
   actions: ChannelActionsSchema,
+  autoGroupBinding: FeishuAutoGroupBindingSchema,
   replyInThread: ReplyInThreadSchema,
   reactionNotifications: ReactionNotificationModeSchema,
   typingIndicator: z.boolean().optional(),

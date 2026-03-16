@@ -18,6 +18,20 @@ Automatically saves session context to memory when you issue `/new` or `/reset`.
 openclaw hooks enable session-memory
 ```
 
+### 🧭 focus-memory
+
+Keeps a tiny `memory.md` summary updated from recent direct messages to `main`.
+
+**Events**: `message:preprocessed`
+**What it does**: Tracks the current project, current request, and recent topics in a compact always-injected file.
+**Output**: `<workspace>/memory.md`
+
+**Enable**:
+
+```bash
+openclaw hooks enable focus-memory
+```
+
 ### 📎 bootstrap-extra-files
 
 Injects extra bootstrap files (for example monorepo `AGENTS.md`/`TOOLS.md`) during prompt assembly.

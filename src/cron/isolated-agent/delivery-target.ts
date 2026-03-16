@@ -1,3 +1,4 @@
+import { resolveAgentPrimaryReportTarget } from "../../agents/report-targets.js";
 import type { ChannelId } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
@@ -50,6 +51,13 @@ export async function resolveDeliveryTarget(
 ): Promise<DeliveryTargetResolution> {
   const requestedChannel = typeof jobPayload.channel === "string" ? jobPayload.channel : "last";
   const explicitTo = typeof jobPayload.to === "string" ? jobPayload.to : undefined;
+  const primaryTarget = resolveAgentPrimaryReportTarget(cfg, agentId);
+  const shouldUsePrimaryTarget =
+    !explicitTo &&
+    Boolean(primaryTarget) &&
+    (requestedChannel === "last" || requestedChannel === primaryTarget?.channel);
+  const requestedChannelForResolution =
+    shouldUsePrimaryTarget && primaryTarget ? primaryTarget.channel : requestedChannel;
   const allowMismatchedLastTo = requestedChannel === "last";
 
   const sessionCfg = cfg.session;
@@ -65,7 +73,7 @@ export async function resolveDeliveryTarget(
 
   const preliminary = resolveSessionDeliveryTarget({
     entry: main,
-    requestedChannel,
+    requestedChannel: requestedChannelForResolution,
     explicitTo,
     allowMismatchedLastTo,
   });
@@ -91,7 +99,7 @@ export async function resolveDeliveryTarget(
   const resolved = fallbackChannel
     ? resolveSessionDeliveryTarget({
         entry: main,
-        requestedChannel,
+        requestedChannel: requestedChannelForResolution,
         explicitTo,
         fallbackChannel,
         allowMismatchedLastTo,
@@ -101,7 +109,11 @@ export async function resolveDeliveryTarget(
 
   const channel = resolved.channel ?? fallbackChannel;
   const mode = resolved.mode as "explicit" | "implicit";
-  let toCandidate = resolved.to;
+  let toCandidate =
+    resolved.to ??
+    (shouldUsePrimaryTarget && primaryTarget && channel === primaryTarget.channel
+      ? primaryTarget.to
+      : undefined);
 
   // Prefer an explicit accountId from the job's delivery config (set via
   // --account on cron add/edit). Fall back to the session's lastAccountId,
@@ -111,6 +123,9 @@ export async function resolveDeliveryTarget(
       ? jobPayload.accountId.trim()
       : undefined;
   let accountId = explicitAccountId ?? resolved.accountId;
+  if (!accountId && shouldUsePrimaryTarget && primaryTarget && channel === primaryTarget.channel) {
+    accountId = primaryTarget.accountId;
+  }
   if (!accountId && channel) {
     const bindings = buildChannelAccountBindings(cfg);
     const byAgent = bindings.get(channel);

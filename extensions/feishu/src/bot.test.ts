@@ -25,9 +25,17 @@ const {
   mockEnsureConfiguredAcpRouteReady,
   mockResolveBoundConversation,
   mockTouchBinding,
+  mockSyncAgentReportTarget,
 } = vi.hoisted(() => ({
   mockCreateFeishuReplyDispatcher: vi.fn(() => ({
-    dispatcher: vi.fn(),
+    dispatcher: {
+      sendToolResult: vi.fn(() => true),
+      sendBlockReply: vi.fn(() => true),
+      sendFinalReply: vi.fn(() => true),
+      waitForIdle: vi.fn(async () => {}),
+      getQueuedCounts: vi.fn(() => ({ tool: 0, block: 0, final: 0 })),
+      markComplete: vi.fn(),
+    },
     replyOptions: {},
     markDispatchIdle: vi.fn(),
   })),
@@ -57,6 +65,16 @@ const {
   mockEnsureConfiguredAcpRouteReady: vi.fn(async (_params?: unknown) => ({ ok: true })),
   mockResolveBoundConversation: vi.fn(() => null),
   mockTouchBinding: vi.fn(),
+  mockSyncAgentReportTarget: vi.fn(async (params: { target: unknown }) => ({
+    target: params.target,
+    previousTarget: undefined,
+    alreadyCurrent: false,
+    configChanged: true,
+    cronMatched: 1,
+    cronUpdated: 1,
+    cronFailed: 0,
+    config: {},
+  })),
 }));
 
 vi.mock("./reply-dispatcher.js", () => ({
@@ -87,6 +105,10 @@ vi.mock("../../../src/infra/outbound/session-binding-service.js", () => ({
     resolveByConversation: mockResolveBoundConversation,
     touch: mockTouchBinding,
   }),
+}));
+
+vi.mock("../../../src/agents/report-target-sync.js", () => ({
+  syncAgentReportTarget: mockSyncAgentReportTarget,
 }));
 
 function createRuntimeEnv(): RuntimeEnv {
@@ -389,6 +411,7 @@ describe("handleFeishuMessage ACP routing", () => {
 });
 
 describe("handleFeishuMessage command authorization", () => {
+  let runtimeMock: PluginRuntime;
   const mockFinalizeInboundContext = vi.fn((ctx: unknown) => ctx);
   const mockDispatchReplyFromConfig = vi
     .fn()
@@ -426,6 +449,16 @@ describe("handleFeishuMessage command authorization", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSyncAgentReportTarget.mockReset().mockImplementation(async (params: { target: unknown }) => ({
+      target: params.target,
+      previousTarget: undefined,
+      alreadyCurrent: false,
+      configChanged: true,
+      cronMatched: 1,
+      cronUpdated: 1,
+      cronFailed: 0,
+      config: {},
+    }));
     mockShouldComputeCommandAuthorized.mockReset().mockReturnValue(true);
     mockGetMessageFeishu.mockReset().mockResolvedValue(null);
     mockListFeishuThreadMessages.mockReset().mockResolvedValue([]);
@@ -457,8 +490,7 @@ describe("handleFeishuMessage command authorization", () => {
       },
     });
     mockEnqueueSystemEvent.mockReset();
-    setFeishuRuntime(
-      createPluginRuntimeMock({
+    runtimeMock = createPluginRuntimeMock({
         system: {
           enqueueSystemEvent: mockEnqueueSystemEvent,
         },
@@ -501,8 +533,8 @@ describe("handleFeishuMessage command authorization", () => {
         media: {
           detectMime: vi.fn(async () => "application/octet-stream"),
         },
-      }),
-    );
+      });
+    setFeishuRuntime(runtimeMock);
   });
 
   it("does not enqueue inbound preview text as system events", async () => {
@@ -575,6 +607,50 @@ describe("handleFeishuMessage command authorization", () => {
         SenderId: "ou-attacker",
         Surface: "feishu",
       }),
+    );
+  });
+
+  it("logs tool/block/final counts for single-agent dispatch completion", async () => {
+    mockShouldComputeCommandAuthorized.mockReturnValue(false);
+    mockDispatchReplyFromConfig.mockResolvedValueOnce({
+      queuedFinal: false,
+      counts: { tool: 1, block: 2, final: 3 },
+    });
+
+    const cfg: ClawdbotConfig = {
+      channels: {
+        feishu: {
+          dmPolicy: "open",
+        },
+      },
+    } as ClawdbotConfig;
+
+    const event: FeishuMessageEvent = {
+      sender: {
+        sender_id: {
+          open_id: "ou-attacker",
+        },
+      },
+      message: {
+        message_id: "msg-log-counts",
+        chat_id: "oc-dm",
+        chat_type: "p2p",
+        message_type: "text",
+        content: JSON.stringify({ text: "hello" }),
+      },
+    };
+    const runtime = createRuntimeEnv();
+
+    await handleFeishuMessage({
+      cfg,
+      event,
+      runtime,
+    });
+
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "dispatch complete (queuedFinal=false, tool=1, block=2, final=3)",
+      ),
     );
   });
 
@@ -1546,6 +1622,312 @@ describe("handleFeishuMessage command authorization", () => {
     );
   });
 
+  it("auto-binds an unbound group by group name before dispatch", async () => {
+    mockShouldComputeCommandAuthorized.mockReturnValue(false);
+    mockCreateFeishuClient.mockReturnValue({
+      contact: {
+        user: {
+          get: vi.fn().mockResolvedValue({ data: { user: { name: "Sender" } } }),
+        },
+      },
+      im: {
+        chat: {
+          get: vi.fn().mockResolvedValue({
+            code: 0,
+            data: { name: "项目-smart-factory" },
+          }),
+        },
+      },
+    });
+    mockResolveAgentRoute.mockImplementation(({ cfg, peer, accountId }) => {
+      const binding = (cfg.bindings ?? []).find(
+        (entry) =>
+          entry.match?.channel === "feishu" &&
+          entry.match?.peer?.kind === peer.kind &&
+          entry.match?.peer?.id === peer.id,
+      );
+      const agentId = binding?.agentId ?? "main";
+      return {
+        agentId,
+        channel: "feishu",
+        accountId: accountId ?? "default",
+        sessionKey: `agent:${agentId}:feishu:group:${peer.id}`,
+        mainSessionKey: `agent:${agentId}:main`,
+        matchedBy: binding ? "binding" : "default",
+      };
+    });
+
+    const cfg: ClawdbotConfig = {
+      agents: {
+        list: [{ id: "main" }, { id: "smart-factory" }],
+      },
+      channels: {
+        feishu: {
+          appId: "cli_test",
+          appSecret: "sec_test", // pragma: allowlist secret
+          groupPolicy: "allowlist",
+          groups: {
+            "oc-group": {
+              requireMention: false,
+            },
+          },
+          autoGroupBinding: {
+            enabled: true,
+          },
+        },
+      },
+      bindings: [],
+    } as ClawdbotConfig;
+    vi.mocked(runtimeMock.config.loadConfig).mockReturnValue(cfg);
+
+    const event: FeishuMessageEvent = {
+      sender: {
+        sender_id: {
+          open_id: "ou-auto-bind",
+        },
+      },
+      message: {
+        message_id: "msg-auto-bind-group",
+        chat_id: "oc-group",
+        chat_type: "group",
+        message_type: "text",
+        content: JSON.stringify({ text: "请开始处理这个项目" }),
+      },
+    };
+
+    await dispatchMessage({ cfg, event });
+
+    expect(vi.mocked(runtimeMock.config.writeConfigFile)).toHaveBeenCalledTimes(1);
+    expect(mockDispatchReplyFromConfig).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeInboundContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        SessionKey: "agent:smart-factory:feishu:group:oc-group",
+      }),
+    );
+  });
+
+  it("sends an explicit bind confirmation when auto-bind succeeds but agent returns no reply", async () => {
+    mockShouldComputeCommandAuthorized.mockReturnValue(false);
+    mockDispatchReplyFromConfig.mockResolvedValueOnce({
+      queuedFinal: false,
+      counts: { tool: 0, block: 0, final: 0 },
+    });
+    mockCreateFeishuClient.mockReturnValue({
+      contact: {
+        user: {
+          get: vi.fn().mockResolvedValue({ data: { user: { name: "Sender" } } }),
+        },
+      },
+      im: {
+        chat: {
+          get: vi.fn().mockResolvedValue({
+            code: 0,
+            data: { name: "项目-smart-factory" },
+          }),
+        },
+      },
+    });
+    mockResolveAgentRoute.mockImplementation(({ cfg, peer, accountId }) => {
+      const binding = (cfg.bindings ?? []).find(
+        (entry) =>
+          entry.match?.channel === "feishu" &&
+          entry.match?.peer?.kind === peer.kind &&
+          entry.match?.peer?.id === peer.id,
+      );
+      const agentId = binding?.agentId ?? "main";
+      return {
+        agentId,
+        channel: "feishu",
+        accountId: accountId ?? "default",
+        sessionKey: `agent:${agentId}:feishu:group:${peer.id}`,
+        mainSessionKey: `agent:${agentId}:main`,
+        matchedBy: binding ? "binding" : "default",
+      };
+    });
+    const queuedCounts = { tool: 0, block: 0, final: 0 };
+    const dispatcher = {
+      sendToolResult: vi.fn(() => true),
+      sendBlockReply: vi.fn(() => true),
+      sendFinalReply: vi.fn(() => {
+        queuedCounts.final += 1;
+        return true;
+      }),
+      waitForIdle: vi.fn(async () => {}),
+      getQueuedCounts: vi.fn(() => ({ ...queuedCounts })),
+      markComplete: vi.fn(),
+    };
+    mockCreateFeishuReplyDispatcher.mockImplementationOnce(() => ({
+      dispatcher,
+      replyOptions: {},
+      markDispatchIdle: vi.fn(),
+    }));
+
+    const cfg: ClawdbotConfig = {
+      agents: {
+        list: [{ id: "main" }, { id: "smart-factory" }],
+      },
+      channels: {
+        feishu: {
+          appId: "cli_test",
+          appSecret: "sec_test", // pragma: allowlist secret
+          groupPolicy: "allowlist",
+          groups: {
+            "oc-group": {
+              requireMention: false,
+            },
+          },
+          autoGroupBinding: {
+            enabled: true,
+          },
+        },
+      },
+      bindings: [],
+    } as ClawdbotConfig;
+    vi.mocked(runtimeMock.config.loadConfig).mockReturnValue(cfg);
+    const runtime = createRuntimeEnv();
+
+    const event: FeishuMessageEvent = {
+      sender: {
+        sender_id: {
+          open_id: "ou-auto-bind",
+        },
+      },
+      message: {
+        message_id: "msg-auto-bind-empty-reply",
+        chat_id: "oc-group",
+        chat_type: "group",
+        message_type: "text",
+        content: JSON.stringify({ text: "这个项目以后在这里汇报" }),
+      },
+    };
+
+    await handleFeishuMessage({
+      cfg,
+      event,
+      runtime,
+    });
+
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text:
+          "已将本群绑定到 `smart-factory`。后续这个项目会在这里继续汇报。\n- 已同步 cron 投递：1/1",
+      }),
+    );
+    expect(mockSyncAgentReportTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "smart-factory",
+        target: {
+          channel: "feishu",
+          to: "chat:oc-group",
+          accountId: "default",
+        },
+      }),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("dispatch complete (queuedFinal=true, tool=0, block=0, final=1)"),
+    );
+  });
+
+  it("sends an explicit confirmation when a bound project group returns no reply", async () => {
+    mockShouldComputeCommandAuthorized.mockReturnValue(false);
+    mockDispatchReplyFromConfig.mockResolvedValueOnce({
+      queuedFinal: false,
+      counts: { tool: 0, block: 0, final: 0 },
+    });
+    mockResolveAgentRoute.mockReturnValue({
+      agentId: "production-control-platform",
+      channel: "feishu",
+      accountId: "default",
+      sessionKey: "agent:production-control-platform:feishu:group:oc-group",
+      mainSessionKey: "agent:production-control-platform:main",
+      matchedBy: "binding.peer",
+    });
+    const queuedCounts = { tool: 0, block: 0, final: 0 };
+    const dispatcher = {
+      sendToolResult: vi.fn(() => true),
+      sendBlockReply: vi.fn(() => true),
+      sendFinalReply: vi.fn(() => {
+        queuedCounts.final += 1;
+        return true;
+      }),
+      waitForIdle: vi.fn(async () => {}),
+      getQueuedCounts: vi.fn(() => ({ ...queuedCounts })),
+      markComplete: vi.fn(),
+    };
+    mockCreateFeishuReplyDispatcher.mockImplementationOnce(() => ({
+      dispatcher,
+      replyOptions: {},
+      markDispatchIdle: vi.fn(),
+    }));
+
+    const cfg: ClawdbotConfig = {
+      channels: {
+        feishu: {
+          groupPolicy: "open",
+          groups: {
+            "oc-group": {
+              requireMention: false,
+            },
+          },
+        },
+      },
+      bindings: [
+        {
+          agentId: "production-control-platform",
+          match: {
+            channel: "feishu",
+            peer: {
+              kind: "group",
+              id: "oc-group",
+            },
+          },
+        },
+      ],
+    } as ClawdbotConfig;
+    const runtime = createRuntimeEnv();
+
+    const event: FeishuMessageEvent = {
+      sender: {
+        sender_id: {
+          open_id: "ou-bound-group",
+        },
+      },
+      message: {
+        message_id: "msg-bound-group-empty-reply",
+        chat_id: "oc-group",
+        chat_type: "group",
+        message_type: "text",
+        content: JSON.stringify({ text: "这个项目以后在这里汇报" }),
+      },
+    };
+
+    await handleFeishuMessage({
+      cfg,
+      event,
+      runtime,
+    });
+
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text:
+          "当前群已绑定到 `production-control-platform`。我收到这条要求了，后续会在这里继续汇报。\n- 已同步 cron 投递：1/1",
+      }),
+    );
+    expect(mockSyncAgentReportTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "production-control-platform",
+        target: {
+          channel: "feishu",
+          to: "chat:oc-group",
+          accountId: "default",
+        },
+      }),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("dispatch complete (queuedFinal=true, tool=0, block=0, final=1)"),
+    );
+  });
+
   it("routes group sessions by sender when groupSessionScope=group_sender", async () => {
     mockShouldComputeCommandAuthorized.mockReturnValue(false);
 
@@ -2473,6 +2855,60 @@ describe("broadcast dispatch", () => {
     expect(mockCreateFeishuReplyDispatcher).toHaveBeenCalledTimes(1);
     expect(mockCreateFeishuReplyDispatcher).toHaveBeenCalledWith(
       expect.objectContaining({ agentId: "main" }),
+    );
+  });
+
+  it("logs tool/block/final counts for broadcast completion", async () => {
+    mockDispatchReplyFromConfig
+      .mockResolvedValueOnce({
+        queuedFinal: false,
+        counts: { tool: 1, block: 2, final: 3 },
+      })
+      .mockResolvedValueOnce({
+        queuedFinal: false,
+        counts: { tool: 4, block: 5, final: 6 },
+      });
+
+    const cfg: ClawdbotConfig = {
+      broadcast: { "oc-broadcast-group": ["main", "susan"] },
+      agents: { list: [{ id: "main" }, { id: "susan" }] },
+      channels: {
+        feishu: {
+          groups: {
+            "oc-broadcast-group": {
+              requireMention: true,
+            },
+          },
+        },
+      },
+    } as unknown as ClawdbotConfig;
+
+    const event: FeishuMessageEvent = {
+      sender: { sender_id: { open_id: "ou-sender" } },
+      message: {
+        message_id: "msg-broadcast-log-counts",
+        chat_id: "oc-broadcast-group",
+        chat_type: "group",
+        message_type: "text",
+        content: JSON.stringify({ text: "hello @bot" }),
+        mentions: [
+          { key: "@_user_1", id: { open_id: "bot-open-id" }, name: "Bot", tenant_key: "" },
+        ],
+      },
+    };
+    const runtime = createRuntimeEnv();
+
+    await handleFeishuMessage({
+      cfg,
+      event,
+      botOpenId: "bot-open-id",
+      runtime,
+    });
+
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "broadcast dispatch complete for 2 agents (tool=5, block=7, final=9)",
+      ),
     );
   });
 

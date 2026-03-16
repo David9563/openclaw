@@ -810,6 +810,28 @@ describe("agentCommand", () => {
     });
   });
 
+  it("does not route Feishu group creation requests to writer", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store, undefined, undefined, [
+        { id: "main", default: true },
+        { id: "writer" },
+      ]);
+
+      await agentCommand(
+        {
+          message: "创建 production-control-platform 飞书群",
+          agentId: "main",
+        },
+        runtime,
+      );
+
+      expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
+      expect(hoisted.callGatewayMock).not.toHaveBeenCalled();
+      expect(getLastEmbeddedCall()?.prompt).toBe("创建 production-control-platform 飞书群");
+    });
+  });
+
   it("clears stale Claude CLI legacy session IDs before retrying after session expiration", async () => {
     vi.mocked(modelSelectionModule.isCliProvider).mockImplementation(
       (provider) => provider.trim().toLowerCase() === "claude-cli",

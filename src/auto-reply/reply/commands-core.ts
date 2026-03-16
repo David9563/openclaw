@@ -26,6 +26,8 @@ import {
 import { handleModelsCommand } from "./commands-models.js";
 import { handleOpsCommand } from "./commands-ops.js";
 import { handlePluginCommand } from "./commands-plugin.js";
+import { handleProjectAutomationCommand } from "./commands-project-automation.js";
+import { handleReportTargetCommand } from "./commands-report-target.js";
 import {
   handleAbortTrigger,
   handleActivationCommand,
@@ -189,11 +191,13 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       handleHelpCommand,
       handleCommandsListCommand,
       handleStatusCommand,
+      handleProjectAutomationCommand,
       handleAllowlistCommand,
       handleApproveCommand,
       handleContextCommand,
       handleExportSessionCommand,
       handleWhoamiCommand,
+      handleReportTargetCommand,
       handleClusterDelegationCommand,
       handleOpsCommand,
       handleSubagentsCommand,

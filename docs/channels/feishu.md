@@ -656,6 +656,69 @@ Routing fields:
 
 See [Get group/user IDs](#get-groupuser-ids) for lookup tips.
 
+### Auto-bind groups by group name
+
+If you prefer “one project group = one agent window”, Feishu can bootstrap the
+binding from the **group name** the first time an unbound group talks to the bot.
+
+When `autoGroupBinding.enabled` is on:
+
+- OpenClaw fetches the Feishu group name from `chat_id`
+- matches that name against existing agent `id` or `name`
+- strips common prefixes like `项目-`, `project-`, `group-`, `agent-`
+- writes a persistent `bindings[]` entry using the stable `chat_id`
+- adds the group to `groupAllowFrom` when `groupPolicy: "allowlist"`
+
+This keeps the bootstrap natural-language friendly while making the final
+routing stable and deterministic.
+
+Example:
+
+```json5
+{
+  channels: {
+    feishu: {
+      groupPolicy: "allowlist",
+      autoGroupBinding: {
+        enabled: true,
+        aliases: {
+          写作: "writer",
+        },
+      },
+    },
+  },
+  agents: {
+    list: [{ id: "main" }, { id: "smart-factory" }, { id: "writer", name: "写作" }],
+  },
+}
+```
+
+Recommended naming convention:
+
+- `项目-smart-factory` → `smart-factory`
+- `writer` → `writer`
+- `写作` → `writer` via `aliases`
+
+### Move routine reports to the current group
+
+Once a Feishu group is already bound to an agent, you can tell that agent in
+the group to use the current group as its default report surface.
+
+Examples:
+
+- `以后这个项目的开发和汇报都在这个群里进行`
+- `以后在这里汇报`
+- `把汇报迁到这里`
+
+When OpenClaw recognizes this intent in a bound group, it will:
+
+- save the current group as the agent's primary report target
+- use that target for future implicit cron announce delivery for the agent
+- migrate existing announce-mode cron jobs for that agent to the same group
+
+This keeps the chat flow natural while making background reporting follow the
+same project group automatically.
+
 ---
 
 ## Configuration reference
@@ -682,6 +745,7 @@ Key options:
 | `channels.feishu.allowFrom`                       | DM allowlist (open_id list)             | -                |
 | `channels.feishu.groupPolicy`                     | Group policy                            | `open`           |
 | `channels.feishu.groupAllowFrom`                  | Group allowlist                         | -                |
+| `channels.feishu.autoGroupBinding`                | Auto-bind new groups by group name      | -                |
 | `channels.feishu.groups.<chat_id>.requireMention` | Require @mention                        | `true`           |
 | `channels.feishu.groups.<chat_id>.enabled`        | Enable group                            | `true`           |
 | `channels.feishu.textChunkLimit`                  | Message chunk size                      | `2000`           |

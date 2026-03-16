@@ -82,7 +82,6 @@ function matchWriterDelegation(normalized: string, raw: string): ClusterRouteMat
 
   const writingSignals = [
     "飞书文档",
-    "飞书",
     "文档",
     "汇报",
     "周报",
@@ -120,6 +119,13 @@ function matchWriterDelegation(normalized: string, raw: string): ClusterRouteMat
     "写个",
     "写一份",
   ];
+
+  // Bare "飞书" was too broad and matched requests like "创建飞书群",
+  // which are collaboration/group-management asks rather than writing tasks.
+  const nonWritingSignals = ["飞书群", "群聊", "群组", "拉群", "建群", "加群", "进群"];
+  if (nonWritingSignals.some((signal) => normalized.includes(signal))) {
+    return null;
+  }
 
   if (!writingSignals.some((signal) => normalized.includes(signal))) {
     return null;

@@ -103,3 +103,9 @@ export type DynamicAgentCreationConfig = {
   agentDirTemplate?: string;
   maxAgents?: number;
 };
+
+export type FeishuAutoGroupBindingConfig = {
+  enabled?: boolean;
+  aliases?: Record<string, string>;
+  prefixes?: string[];
+};

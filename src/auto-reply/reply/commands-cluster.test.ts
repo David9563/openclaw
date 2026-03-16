@@ -129,6 +129,34 @@ describe("cluster delegation command", () => {
     expect(result?.reply?.text).toContain("https://feishu.cn/docx/writer-retro");
   });
 
+  it("does not auto-route Feishu group creation requests to writer", async () => {
+    const params = buildCommandTestParams("创建 production-control-platform 飞书群", baseCfg);
+    const result = await handleClusterDelegationCommand(params, true);
+
+    expect(result).toBeNull();
+    expect(hoisted.callGatewayMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces unauthorized auto-delegation instead of silently dropping it", async () => {
+    const params = buildCommandTestParams("帮我把这周的问题做个复盘", baseCfg);
+    const result = await handleClusterDelegationCommand(
+      {
+        ...params,
+        command: {
+          ...params.command,
+          isAuthorizedSender: false,
+          senderId: "unauthorized",
+        },
+      },
+      true,
+    );
+
+    expect(result?.shouldContinue).toBe(false);
+    expect(result?.reply?.text).toContain("/writer");
+    expect(result?.reply?.text).toContain("没有命令权限");
+    expect(hoisted.callGatewayMock).not.toHaveBeenCalled();
+  });
+
   it("ignores unrelated messages", async () => {
     const params = buildCommandTestParams("帮我看下 smart-factory 的服务状态", baseCfg);
     const result = await handleClusterDelegationCommand(params, true);

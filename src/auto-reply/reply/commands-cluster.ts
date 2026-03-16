@@ -45,7 +45,9 @@ export const handleClusterDelegationCommand: CommandHandler = async (params, all
     logVerbose(
       `Ignoring ${delegation.route.command} delegation from unauthorized sender: ${params.command.senderId || "<unknown>"}`,
     );
-    return { shouldContinue: false };
+    return stopWithText(
+      `⚠️ 这条消息命中了 ${delegation.route.command} 自动委托，但当前发送者没有命令权限，所以没有执行。`,
+    );
   }
 
   const delegated = await runInternalClusterDelegation({

@@ -764,6 +764,22 @@ const AgentRuntimeSchema = z
   ])
   .optional();
 
+const AgentReportTargetSchema = z
+  .object({
+    channel: z.string(),
+    to: z.string(),
+    accountId: z.string().optional(),
+  })
+  .strict()
+  .optional();
+
+const AgentReportingSchema = z
+  .object({
+    primaryTarget: AgentReportTargetSchema,
+  })
+  .strict()
+  .optional();
+
 export const AgentEntrySchema = z
   .object({
     id: z.string(),
@@ -799,6 +815,7 @@ export const AgentEntrySchema = z
     sandbox: AgentSandboxSchema,
     params: z.record(z.string(), z.unknown()).optional(),
     tools: AgentToolsSchema,
+    reporting: AgentReportingSchema,
     runtime: AgentRuntimeSchema,
   })
   .strict();

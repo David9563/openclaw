@@ -58,6 +58,16 @@ export type AgentAcpBinding = {
 
 export type AgentBinding = AgentRouteBinding | AgentAcpBinding;
 
+export type AgentReportTarget = {
+  channel: string;
+  to: string;
+  accountId?: string;
+};
+
+export type AgentReportingConfig = {
+  primaryTarget?: AgentReportTarget;
+};
+
 export type AgentConfig = {
   id: string;
   default?: boolean;
@@ -85,6 +95,8 @@ export type AgentConfig = {
   /** Optional per-agent stream params (e.g. cacheRetention, temperature). */
   params?: Record<string, unknown>;
   tools?: AgentToolsConfig;
+  /** Optional per-agent default destination for routine progress reports. */
+  reporting?: AgentReportingConfig;
   /** Optional runtime descriptor for this agent. */
   runtime?: AgentRuntimeConfig;
 };

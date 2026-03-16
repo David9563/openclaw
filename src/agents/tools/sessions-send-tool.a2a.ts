@@ -7,6 +7,7 @@ import { AGENT_LANE_NESTED } from "../lanes.js";
 import { readLatestAssistantReply, runAgentStep } from "./agent-step.js";
 import { resolveAnnounceTarget } from "./sessions-announce-target.js";
 import {
+  type AnnounceTarget,
   buildAgentToAgentAnnounceContext,
   buildAgentToAgentReplyContext,
   isAnnounceSkip,
@@ -14,6 +15,51 @@ import {
 } from "./sessions-send-helpers.js";
 
 const log = createSubsystemLogger("agents/sessions-send");
+
+async function deliverA2AMessage(params: {
+  target: AnnounceTarget;
+  message: string;
+  runContextId: string;
+  deliveryKind: "announce" | "requester fallback";
+}) {
+  try {
+    await callGateway({
+      method: "send",
+      params: {
+        to: params.target.to,
+        message: params.message,
+        channel: params.target.channel,
+        accountId: params.target.accountId,
+        threadId: params.target.threadId,
+        idempotencyKey: crypto.randomUUID(),
+      },
+      timeoutMs: 10_000,
+    });
+    return true;
+  } catch (err) {
+    log.warn(`sessions_send ${params.deliveryKind} delivery failed`, {
+      runId: params.runContextId,
+      channel: params.target.channel,
+      to: params.target.to,
+      error: formatErrorMessage(err),
+    });
+    return false;
+  }
+}
+
+function resolveRequesterFallbackText(params: {
+  primaryReply?: string;
+  latestReply?: string;
+}) {
+  for (const candidate of [params.primaryReply, params.latestReply]) {
+    const text = candidate?.trim();
+    if (!text || isReplySkip(text) || isAnnounceSkip(text)) {
+      continue;
+    }
+    return text;
+  }
+  return undefined;
+}
 
 export async function runSessionsSendA2AFlow(params: {
   targetSessionKey: string;
@@ -55,6 +101,13 @@ export async function runSessionsSendA2AFlow(params: {
       sessionKey: params.targetSessionKey,
       displayKey: params.displayKey,
     });
+    const requesterTarget =
+      params.requesterSessionKey && params.requesterSessionKey !== params.targetSessionKey
+        ? await resolveAnnounceTarget({
+            sessionKey: params.requesterSessionKey,
+            displayKey: params.requesterSessionKey,
+          })
+        : null;
     const targetChannel = announceTarget?.channel ?? "unknown";
 
     if (
@@ -118,27 +171,31 @@ export async function runSessionsSendA2AFlow(params: {
       sourceChannel: params.requesterChannel,
       sourceTool: "sessions_send",
     });
-    if (announceTarget && announceReply && announceReply.trim() && !isAnnounceSkip(announceReply)) {
-      try {
-        await callGateway({
-          method: "send",
-          params: {
-            to: announceTarget.to,
-            message: announceReply.trim(),
-            channel: announceTarget.channel,
-            accountId: announceTarget.accountId,
-            idempotencyKey: crypto.randomUUID(),
-          },
-          timeoutMs: 10_000,
-        });
-      } catch (err) {
-        log.warn("sessions_send announce delivery failed", {
-          runId: runContextId,
-          channel: announceTarget.channel,
-          to: announceTarget.to,
-          error: formatErrorMessage(err),
-        });
-      }
+    const announceText = announceReply?.trim();
+    if (announceTarget && announceText && !isAnnounceSkip(announceText)) {
+      await deliverA2AMessage({
+        target: announceTarget,
+        message: announceText,
+        runContextId,
+        deliveryKind: "announce",
+      });
+      return;
+    }
+
+    // When the target agent suppresses announce delivery, surface the original
+    // target reply back to the requester chat so delegated work does not vanish
+    // into an internal agent-to-agent transcript.
+    const fallbackText = resolveRequesterFallbackText({
+      primaryReply,
+      latestReply,
+    });
+    if (requesterTarget && fallbackText) {
+      await deliverA2AMessage({
+        target: requesterTarget,
+        message: fallbackText,
+        runContextId,
+        deliveryKind: "requester fallback",
+      });
     }
   } catch (err) {
     log.warn("sessions_send announce flow failed", {

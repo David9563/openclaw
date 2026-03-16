@@ -237,6 +237,42 @@ describe("FeishuConfigSchema actions", () => {
   });
 });
 
+describe("FeishuConfigSchema autoGroupBinding", () => {
+  it("accepts autoGroupBinding config", () => {
+    const result = FeishuConfigSchema.parse({
+      autoGroupBinding: {
+        enabled: true,
+        aliases: {
+          写作: "writer",
+        },
+        prefixes: ["项目-"],
+      },
+    });
+
+    expect(result.autoGroupBinding).toEqual({
+      enabled: true,
+      aliases: {
+        写作: "writer",
+      },
+      prefixes: ["项目-"],
+    });
+  });
+
+  it("accepts account-level autoGroupBinding config", () => {
+    const result = FeishuConfigSchema.parse({
+      accounts: {
+        main: {
+          autoGroupBinding: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    expect(result.accounts?.main?.autoGroupBinding).toEqual({ enabled: true });
+  });
+});
+
 describe("FeishuConfigSchema defaultAccount", () => {
   it("accepts defaultAccount when it matches an account key", () => {
     const result = FeishuConfigSchema.safeParse({

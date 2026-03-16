@@ -335,6 +335,68 @@ describe("resolveDeliveryTarget", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("prefers the agent primary report target when no session route exists", async () => {
+    setMainSessionEntry(undefined);
+
+    const result = await resolveDeliveryTarget(
+      makeCfg({
+        agents: {
+          list: [
+            {
+              id: AGENT_ID,
+              reporting: {
+                primaryTarget: {
+                  channel: "telegram",
+                  to: "group:primary-room",
+                },
+              },
+            },
+          ],
+        },
+      }),
+      AGENT_ID,
+      {
+        channel: "last",
+        to: undefined,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.channel).toBe("telegram");
+    expect(result.to).toBe("group:primary-room");
+  });
+
+  it("uses the agent primary report target accountId when provided", async () => {
+    setMainSessionEntry(undefined);
+
+    const result = await resolveDeliveryTarget(
+      makeCfg({
+        agents: {
+          list: [
+            {
+              id: AGENT_ID,
+              reporting: {
+                primaryTarget: {
+                  channel: "telegram",
+                  to: "group:primary-room",
+                  accountId: "primary-account",
+                },
+              },
+            },
+          ],
+        },
+      }),
+      AGENT_ID,
+      {
+        channel: "last",
+        to: undefined,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.accountId).toBe("primary-account");
+  });
+
   it("explicit delivery.accountId overrides session-derived accountId", async () => {
     setLastSessionEntry({
       sessionId: "sess-5",

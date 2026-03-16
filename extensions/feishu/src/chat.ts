@@ -36,6 +36,25 @@ export async function getChatInfo(client: Lark.Client, chatId: string) {
   };
 }
 
+async function createChat(client: Lark.Client, name: string, userIds?: string[]) {
+  const res = await client.im.chat.create({
+    data: {
+      name,
+      user_id_list: userIds ?? [],
+    },
+  });
+  if (res.code !== 0) {
+    throw new Error(res.msg);
+  }
+  return {
+    chat_id: res.data?.chat_id,
+    name: res.data?.name,
+    avatar: res.data?.avatar,
+    description: res.data?.description,
+    owner_id: res.data?.owner_id,
+  };
+}
+
 export async function getChatMembers(
   client: Lark.Client,
   chatId: string,
@@ -145,7 +164,7 @@ export function registerFeishuChatTools(api: OpenClawPluginApi) {
     {
       name: "feishu_chat",
       label: "Feishu Chat",
-      description: "Feishu chat operations. Actions: members, info, member_info",
+      description: "Feishu chat operations. Actions: members, info, member_info, create",
       parameters: FeishuChatSchema,
       async execute(_toolCallId, params) {
         const p = params as FeishuChatParams;
@@ -177,6 +196,9 @@ export function registerFeishuChatTools(api: OpenClawPluginApi) {
               return json(
                 await getFeishuMemberInfo(client, p.member_id, p.member_id_type ?? "open_id"),
               );
+            case "create":
+              if (!p.name) return json({ error: "name is required for create action" });
+              return json(await createChat(client, p.name, p.user_ids));
             default:
               return json({ error: `Unknown action: ${String(p.action)}` });
           }
